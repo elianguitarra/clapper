@@ -71,6 +71,16 @@ function createSegmentId(): string {
   return `segment-${Date.now()}-${Math.random().toString(36).slice(2)}`
 }
 
+let activeSegmentDrag:
+  | {
+      id: string
+      startCursorTimestampInMs: number
+      startSegmentTimeInMs: number
+      durationInMs: number
+      track: number
+    }
+  | undefined
+
 export const useTimeline = create<TimelineStore>((set, get) => ({
   ...getDefaultState(),
 
@@ -587,7 +597,22 @@ export const useTimeline = create<TimelineStore>((set, get) => ({
         }, null, 2))
       */
 
-      const { cellWidth, containerWidth, durationInMsPerStep, setSelectedSegment, setHoveredSegment, setEditedSegment } = get()
+      const {
+        cellWidth,
+        containerWidth,
+        durationInMsPerStep,
+        setSelectedSegment,
+        setHoveredSegment,
+        setEditedSegment,
+        tracks,
+        defaultCellHeight,
+        segments,
+        width,
+        height,
+        defaultSegmentDurationInSteps,
+        durationInMs: previousDurationInMs,
+        invalidate,
+      } = get()
 
       const durationInSteps = (segment.endTimeInMs - segment.startTimeInMs) / durationInMsPerStep
 
@@ -605,6 +630,72 @@ export const useTimeline = create<TimelineStore>((set, get) => ({
 
       const cursorX = pointX + containerWidth / 2
       const cursorTimestampAtInMs = (cursorX / cellWidth) * useTimeline.getState().durationInMsPerStep
+
+      const getTrackAtPointY = (pointY: number): number | undefined => {
+        const timelineY = -pointY
+        let trackTop = 0
+
+        for (let trackIndex = 0; trackIndex < tracks.length; trackIndex++) {
+          const trackHeight = tracks[trackIndex]?.height || defaultCellHeight
+          if (timelineY >= trackTop && timelineY < trackTop + trackHeight) {
+            return trackIndex
+          }
+          trackTop += trackHeight
+        }
+
+        return undefined
+      }
+
+      const moveDraggedSegment = () => {
+        if (!activeSegmentDrag || activeSegmentDrag.id !== segment.id) {
+          return
+        }
+
+        const targetTrack = getTrackAtPointY(event.point.y) ?? activeSegmentDrag.track
+        const targetTrackCategory = getCategoryFromTrackName(tracks[targetTrack]?.name)
+
+        if (targetTrackCategory && targetTrackCategory !== segment.category) {
+          return
+        }
+
+        const rawStartTimeInMs =
+          activeSegmentDrag.startSegmentTimeInMs + cursorTimestampAtInMs - activeSegmentDrag.startCursorTimestampInMs
+        const startTimeInMs = Math.max(0, Math.round(rawStartTimeInMs / durationInMsPerStep) * durationInMsPerStep)
+        const endTimeInMs = startTimeInMs + activeSegmentDrag.durationInMs
+        const collides = segments.some(s => (
+          s.id !== segment.id &&
+          s.track === targetTrack &&
+          !(s.endTimeInMs <= startTimeInMs || s.startTimeInMs >= endTimeInMs)
+        ))
+
+        if (collides) {
+          return
+        }
+
+        segment.startTimeInMs = startTimeInMs
+        segment.endTimeInMs = endTimeInMs
+        segment.track = targetTrack
+        segment.visibility = SegmentVisibility.VISIBLE
+
+        const durationInMs = Math.max(previousDurationInMs, endTimeInMs)
+
+        set({
+          segments: [...segments],
+          durationInMs,
+          atLeastOneSegmentChanged: 1 + get().atLeastOneSegmentChanged,
+          allSegmentsChanged: 1 + get().allSegmentsChanged,
+          ...computeContentSizeMetrics({
+            width,
+            height,
+            tracks,
+            cellWidth,
+            defaultSegmentDurationInSteps,
+            durationInMsPerStep,
+            durationInMs,
+          }),
+        })
+        invalidate()
+      }
 
       //console.log("cells.Cell:onClick() e:", e)
 
@@ -673,8 +764,20 @@ export const useTimeline = create<TimelineStore>((set, get) => ({
             segment,
             status: SegmentEditionStatus.DRAGGING,
           })
+          if (eventType === SegmentPointerEvent.DOWN) {
+            activeSegmentDrag = {
+              id: segment.id,
+              startCursorTimestampInMs: cursorTimestampAtInMs,
+              startSegmentTimeInMs: segment.startTimeInMs,
+              durationInMs: segment.endTimeInMs - segment.startTimeInMs,
+              track: segment.track,
+            }
+          } else if (eventType === SegmentPointerEvent.MOVE) {
+            moveDraggedSegment()
+          }
         }
       } else if (eventType === SegmentPointerEvent.UP) {
+        activeSegmentDrag = undefined
         setHoveredSegment({
           segment: undefined,
           area,
